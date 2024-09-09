@@ -12,6 +12,12 @@ from gensim.parsing.preprocessing import STOPWORDS
 import nltk
 from sentence_transformers import SentenceTransformer
 import numpy as np
+import weaviate
+from weaviate.auth import AuthApiKey
+from weaviate.classes.config import Property, DataType
+from dotenv import load_dotenv
+import os
+import uuid
 nltk.download('punkt')
 nltk.download('punkt_tab')
 nltk.download('stopwords')
@@ -20,6 +26,55 @@ app = Flask(__name__)
 
 nlp = spacy.load("en_core_web_lg")
 embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+load_dotenv()
+
+
+wcd_url = os.getenv("WEAVIATE_URL")
+wcd_api_key = os.getenv("WEAVIATE_API_KEY")
+
+client = weaviate.connect_to_weaviate_cloud(
+    cluster_url=wcd_url,  # Replace with your Weaviate Cloud URL
+    auth_credentials=AuthApiKey(api_key=wcd_api_key)
+)
+
+
+# Define the class for our conversations
+class_obj = {
+    "class": "Conversation",
+    "vectorizer": "none",  # We'll provide our own vectors
+    "vectorIndexType": "hnsw",
+    "properties": [
+        {"name": "transcript", "dataType": ["text"]},
+        {"name": "duration", "dataType": ["number"]},
+        {"name": "language", "dataType": ["string"]},
+        {"name": "entities", "dataType": ["string[]"]},
+        {"name": "keywords", "dataType": ["string[]"]},
+        {"name": "topics", "dataType": ["string[]"]}
+    ]
+}
+
+
+try:
+    # Interact with the Weaviate client
+    # Example: Check if the 'Conversation' collection exists
+    if not client.collections.exists("Conversation"):
+        client.collections.create(
+            "Conversation",
+            properties=[
+                Property(name="transcript", data_type=DataType.TEXT),
+                Property(name="duration", data_type=DataType.NUMBER),
+                Property(name="language", data_type=DataType.TEXT),
+                Property(name="entities", data_type=DataType.TEXT_ARRAY),
+                Property(name="keywords", data_type=DataType.TEXT_ARRAY),
+                Property(name="topics", data_type=DataType.TEXT_ARRAY),
+            ]
+        )
+        print("Created 'Conversation' collection.")
+    else:
+        print("'Conversation' collection already exists.")
+finally:
+    client.close()  # Ensure the connection is always closed
+
 
 def clean_text(text: str) -> str:
     text = text.lower()
@@ -106,6 +161,66 @@ def generate_embeddings(text: str) -> List[float]:
     embedding = embedding_model.encode([text])[0]
     return embedding.tolist()
 
+
+
+def store_conversation(conversation_data: Dict[str, Any]):
+    conversation_id = str(uuid.uuid4())
+    full_embedding = conversation_data['full_text_embedding']
+
+    # Prepare the data object
+    data_object = {
+        "transcript": conversation_data['original_transcription'],
+        "duration": conversation_data['duration'],
+        "language": conversation_data['language'],
+        "entities": [f"{k}:{','.join(v)}" for k, v in conversation_data['entities'].items()],
+        "keywords": [f"{k}:{v}" for k, v in conversation_data['keywords']],
+        "topics": [f"{t['id']}:{','.join([f'{term}:{score}' for term, score in t['terms']])}" for t in conversation_data['topics']]
+    }
+
+    # Reconnect to Weaviate before inserting the data
+    client.connect()
+
+    try:
+        # Insert the object into Weaviate
+        client.collections.get("Conversation").data.insert(
+            properties=data_object,
+            vector=full_embedding,
+            uuid=conversation_id
+        )
+    finally:
+        # Ensure the client connection is closed
+        client.close()
+
+    return conversation_id
+
+
+
+
+
+#def store_conversation(conversation_data: Dict[str, Any]):
+#    conversation_id = str(uuid.uuid4())
+#    full_embedding = conversation_data['full_text_embedding']
+#    
+#    # Prepare the data object
+#    data_object = {
+#        "transcript": conversation_data['original_transcription'],
+#        "duration": conversation_data['duration'],
+#        "language": conversation_data['language'],
+#        "entities": [f"{k}:{','.join(v)}" for k, v in conversation_data['entities'].items()],
+#        "keywords": [f"{k}:{v}" for k, v in conversation_data['keywords']],
+#        "topics": [f"{t['id']}:{','.join([f'{term}:{score}' for term, score in t['terms']])}" for t in conversation_data['topics']]
+#    }
+#    
+#    # Add the object to Weaviate
+#    client.data_object.create(
+#        "Conversation",
+#        data_object,
+#        conversation_id,
+#        vector=full_embedding
+#    )
+#    
+#    return conversation_id
+
 def process_transcription(transcription_data: Dict[str, Any]) -> Dict[str, Any]:
     cleaned_segments = []
     full_text = transcription_data['transcription']
@@ -137,8 +252,10 @@ def process_transcription(transcription_data: Dict[str, Any]) -> Dict[str, Any]:
         'full_text_embedding': full_text_embedding
     }
     
+    # Store the conversation in Weaviate
+    conversation_id = store_conversation(processed_data)
+    processed_data['id'] = conversation_id
 
-    
     return processed_data
 
 @app.route('/process', methods=['POST'])
@@ -165,6 +282,50 @@ def process():
 
     # Return the final processed data
     return jsonify(processed_data)
+
+
+
+@app.route('/search', methods=['POST'])
+def search():
+    query = request.json.get('query')
+    limit = request.json.get('limit', 5)
+    
+    # Generate embedding for the query
+    query_embedding = generate_embeddings(query)
+    
+    # Perform the search
+    results = (
+        client.query
+        .get("Conversation", ["transcript", "duration", "language", "entities", "keywords", "topics"])
+        .with_near_vector({
+            "vector": query_embedding,
+        })
+        .with_limit(limit)
+        .do()
+    )
+    
+    # Format the results
+    formatted_results = []
+    for result in results['data']['Get']['Conversation']:
+        formatted_result = {
+            'id': result['_additional']['id'],
+            'score': result['_additional']['certainty'],
+            'transcript': result['transcript'],
+            'duration': result['duration'],
+            'language': result['language'],
+            'entities': {k: v.split(',') for k, v in [e.split(':') for e in result['entities']]},
+            'keywords': {k: float(v) for k, v in [kw.split(':') for kw in result['keywords']]},
+            'topics': [{
+                'id': int(t.split(':')[0]),
+                'terms': [(term.split(':')[0], float(term.split(':')[1])) for term in t.split(':')[1].split(',')]
+            } for t in result['topics']]
+        }
+        formatted_results.append(formatted_result)
+
+    return jsonify(formatted_results)
+    
+
+
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
