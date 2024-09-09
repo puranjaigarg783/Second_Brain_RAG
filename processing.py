@@ -7,7 +7,8 @@ import spacy
 app = Flask(__name__)
 
 # Load English NER model
-nlp = spacy.load("en_core_web_sm")
+#nlp = spacy.load("en_core_web_sm")
+nlp = spacy.load("en_core_web_lg")
 
 def clean_text(text: str) -> str:
     text = text.lower()
