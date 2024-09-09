@@ -10,6 +10,8 @@ from gensim import corpora
 from gensim.models import LdaModel
 from gensim.parsing.preprocessing import STOPWORDS
 import nltk
+from sentence_transformers import SentenceTransformer
+import numpy as np
 nltk.download('punkt')
 nltk.download('punkt_tab')
 nltk.download('stopwords')
@@ -17,6 +19,7 @@ nltk.download('stopwords')
 app = Flask(__name__)
 
 nlp = spacy.load("en_core_web_lg")
+embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
 def clean_text(text: str) -> str:
     text = text.lower()
@@ -99,30 +102,9 @@ def extract_keywords_and_topics(text: str, num_keywords: int = 10, num_topics: i
         'topics': topics
     }
 
-#def perform_topic_modeling(text: str, num_topics: int = 3) -> List[Dict[str, Any]]:
-#    processed_text = preprocess_for_lda(text)
-#    
-#    # Create a dictionary representation of the documents
-#    dictionary = corpora.Dictionary([processed_text])
-#    
-#    # Create a document-term matrix
-#    corpus = [dictionary.doc2bow(text) for text in [processed_text]]
-#    
-#    # Generate LDA model
-#    lda_model = LdaModel(corpus=corpus, id2word=dictionary, num_topics=num_topics, random_state=100,
-#                         update_every=1, chunksize=100, passes=10, alpha='auto', per_word_topics=True)
-#    
-#    # Extract topics
-#    topics = []
-#    for idx, topic in lda_model.print_topics(-1):
-#        topic_terms = [(term.split('*')[1].strip().replace('"', ''), float(term.split('*')[0])) 
-#                       for term in topic.split(' + ')]
-#        topics.append({
-#            'id': idx,
-#            'terms': topic_terms
-#        })
-#    
-#    return topics
+def generate_embeddings(text: str) -> List[float]:
+    embedding = embedding_model.encode([text])[0]
+    return embedding.tolist()
 
 def process_transcription(transcription_data: Dict[str, Any]) -> Dict[str, Any]:
     cleaned_segments = []
@@ -140,8 +122,8 @@ def process_transcription(transcription_data: Dict[str, Any]) -> Dict[str, Any]:
         cleaned_segments.append(cleaned_segment)
     
     entities = improved_ner(full_text)
-#    topics = perform_topic_modeling(full_text)
     keywords_and_topics = extract_keywords_and_topics(full_text)
+    full_text_embedding = generate_embeddings(full_text)
 
     processed_data = {
         'original_transcription': full_text,
@@ -151,7 +133,8 @@ def process_transcription(transcription_data: Dict[str, Any]) -> Dict[str, Any]:
         'duration': transcription_data['duration'],
         'entities': entities,
         'keywords': keywords_and_topics['keywords'],
-        'topics': keywords_and_topics['topics']
+        'topics': keywords_and_topics['topics'],
+        'full_text_embedding': full_text_embedding
     }
     
 
