@@ -15,6 +15,7 @@ import numpy as np
 import weaviate
 from weaviate.auth import AuthApiKey
 from weaviate.classes.config import Property, DataType
+from weaviate.classes.query import MetadataQuery
 from dotenv import load_dotenv
 import os
 import uuid
@@ -263,45 +264,83 @@ def process():
 
 
 
+@app.before_request
+def before_request():
+    client.connect()
+
+@app.teardown_appcontext
+def teardown_appcontext(exception=None):
+    client.close()
+
+
+
+
 @app.route('/search', methods=['POST'])
 def search():
     query = request.json.get('query')
     limit = request.json.get('limit', 5)
     
+    # Generate embedding for the query
     query_embedding = generate_embeddings(query)
     
-    results = (
-        client.query
-        .get("Conversation", ["transcript", "duration", "language", "entities", "keywords", "topics"])
-        .with_near_vector({
-            "vector": query_embedding,
-        })
-        .with_limit(limit)
-        .do()
+    # Get the Conversation collection
+    conversation_collection = client.collections.get("Conversation")
+    
+    # Perform the search
+    response = conversation_collection.query.near_vector(
+        near_vector=query_embedding,
+        limit=limit,
+        return_metadata=MetadataQuery(distance=True)
     )
     
-    
+    # Format the results
     formatted_results = []
-    for result in results['data']['Get']['Conversation']:
+    for obj in response.objects:
         formatted_result = {
-            'id': result['_additional']['id'],
-            'score': result['_additional']['certainty'],
-            'transcript': result['transcript'],
-            'duration': result['duration'],
-            'language': result['language'],
-            'entities': {k: v.split(',') for k, v in [e.split(':') for e in result['entities']]},
-            'keywords': {k: float(v) for k, v in [kw.split(':') for kw in result['keywords']]},
-            'topics': [{
-                'id': int(t.split(':')[0]),
-                'terms': [(term.split(':')[0], float(term.split(':')[1])) for term in t.split(':')[1].split(',')]
-            } for t in result['topics']]
+            'id': obj.uuid,
+            'score': 1 - obj.metadata.distance,  # Convert distance to a similarity score
+            'distance': obj.metadata.distance,
+            'transcript': obj.properties.get('transcript'),
+            'duration': obj.properties.get('duration'),
+            'language': obj.properties.get('language'),
+            'entities': parse_entities(obj.properties.get('entities', [])),
+            'keywords': parse_keywords(obj.properties.get('keywords', [])),
+            'topics': parse_topics(obj.properties.get('topics', []))
         }
         formatted_results.append(formatted_result)
-
-    return jsonify(formatted_results)
     
+    return jsonify(formatted_results)
 
+def parse_entities(entities):
+    return {k: v.split(',') for k, v in [e.split(':') for e in entities]}
+
+def parse_keywords(keywords):
+    return {k: float(v) for k, v in [kw.split(':') for kw in keywords]}
+
+
+def parse_topics(topics):
+    parsed_topics = []
+    for topic in topics:
+        try:
+            parts = topic.split(':')
+            if len(parts) < 2:
+                continue
+            topic_id = int(parts[0])
+            terms = []
+            for term_score in parts[1].split(','):
+                term_parts = term_score.split(':')
+                if len(term_parts) == 2:
+                    terms.append((term_parts[0], float(term_parts[1])))
+            parsed_topics.append({
+                'id': topic_id,
+                'terms': terms
+            })
+        except Exception as e:
+            logging.warning(f"Error parsing topic: {topic}. Error: {str(e)}")
+    return parsed_topics
 
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
+
+
