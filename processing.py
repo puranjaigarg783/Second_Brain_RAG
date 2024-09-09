@@ -1,3 +1,6 @@
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.decomposition import NMF
+from nltk.corpus import stopwords
 from flask import Flask, request, jsonify
 import re
 import requests
@@ -9,6 +12,7 @@ from gensim.parsing.preprocessing import STOPWORDS
 import nltk
 nltk.download('punkt')
 nltk.download('punkt_tab')
+nltk.download('stopwords')
 
 app = Flask(__name__)
 
@@ -64,30 +68,61 @@ def preprocess_for_lda(text):
     tokens = nltk.word_tokenize(text.lower())
     return [token for token in tokens if token not in STOPWORDS and len(token) > 3]
 
-def perform_topic_modeling(text: str, num_topics: int = 3) -> List[Dict[str, Any]]:
-    processed_text = preprocess_for_lda(text)
+def extract_keywords_and_topics(text: str, num_keywords: int = 10, num_topics: int = 3) -> Dict[str, Any]:
+    # Preprocess text
+    stop_words = set(stopwords.words('english'))
+    words = nltk.word_tokenize(text.lower())
+    words = [word for word in words if word.isalnum() and word not in stop_words]
     
-    # Create a dictionary representation of the documents
-    dictionary = corpora.Dictionary([processed_text])
+    # Keyword Extraction using TF-IDF
+    vectorizer = TfidfVectorizer(max_features=num_keywords)
+    tfidf_matrix = vectorizer.fit_transform([' '.join(words)])
+    feature_names = vectorizer.get_feature_names_out()
+    tfidf_scores = tfidf_matrix.toarray()[0]
+    keywords = [(feature_names[i], tfidf_scores[i]) for i in tfidf_scores.argsort()[::-1]]
     
-    # Create a document-term matrix
-    corpus = [dictionary.doc2bow(text) for text in [processed_text]]
+    # Topic Modeling using NMF
+    nmf_model = NMF(n_components=num_topics, random_state=1)
+    nmf_output = nmf_model.fit_transform(tfidf_matrix)
     
-    # Generate LDA model
-    lda_model = LdaModel(corpus=corpus, id2word=dictionary, num_topics=num_topics, random_state=100,
-                         update_every=1, chunksize=100, passes=10, alpha='auto', per_word_topics=True)
-    
-    # Extract topics
     topics = []
-    for idx, topic in lda_model.print_topics(-1):
-        topic_terms = [(term.split('*')[1].strip().replace('"', ''), float(term.split('*')[0])) 
-                       for term in topic.split(' + ')]
+    for topic_idx, topic in enumerate(nmf_model.components_):
+        top_features_ind = topic.argsort()[:-10 - 1:-1]
+        top_features = [(feature_names[i], topic[i]) for i in top_features_ind]
         topics.append({
-            'id': idx,
-            'terms': topic_terms
+            'id': topic_idx,
+            'terms': top_features
         })
     
-    return topics
+    return {
+        'keywords': keywords,
+        'topics': topics
+    }
+
+#def perform_topic_modeling(text: str, num_topics: int = 3) -> List[Dict[str, Any]]:
+#    processed_text = preprocess_for_lda(text)
+#    
+#    # Create a dictionary representation of the documents
+#    dictionary = corpora.Dictionary([processed_text])
+#    
+#    # Create a document-term matrix
+#    corpus = [dictionary.doc2bow(text) for text in [processed_text]]
+#    
+#    # Generate LDA model
+#    lda_model = LdaModel(corpus=corpus, id2word=dictionary, num_topics=num_topics, random_state=100,
+#                         update_every=1, chunksize=100, passes=10, alpha='auto', per_word_topics=True)
+#    
+#    # Extract topics
+#    topics = []
+#    for idx, topic in lda_model.print_topics(-1):
+#        topic_terms = [(term.split('*')[1].strip().replace('"', ''), float(term.split('*')[0])) 
+#                       for term in topic.split(' + ')]
+#        topics.append({
+#            'id': idx,
+#            'terms': topic_terms
+#        })
+#    
+#    return topics
 
 def process_transcription(transcription_data: Dict[str, Any]) -> Dict[str, Any]:
     cleaned_segments = []
@@ -105,8 +140,9 @@ def process_transcription(transcription_data: Dict[str, Any]) -> Dict[str, Any]:
         cleaned_segments.append(cleaned_segment)
     
     entities = improved_ner(full_text)
-    topics = perform_topic_modeling(full_text)
-    
+#    topics = perform_topic_modeling(full_text)
+    keywords_and_topics = extract_keywords_and_topics(full_text)
+
     processed_data = {
         'original_transcription': full_text,
         'cleaned_transcription': clean_text(full_text),
@@ -114,8 +150,11 @@ def process_transcription(transcription_data: Dict[str, Any]) -> Dict[str, Any]:
         'language': transcription_data['language'],
         'duration': transcription_data['duration'],
         'entities': entities,
-	'topics': topics
+        'keywords': keywords_and_topics['keywords'],
+        'topics': keywords_and_topics['topics']
     }
+    
+
     
     return processed_data
 
