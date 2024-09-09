@@ -3,11 +3,15 @@ import re
 import requests
 from typing import Dict, Any, List
 import spacy
+from gensim import corpora
+from gensim.models import LdaModel
+from gensim.parsing.preprocessing import STOPWORDS
+import nltk
+nltk.download('punkt')
+nltk.download('punkt_tab')
 
 app = Flask(__name__)
 
-# Load English NER model
-#nlp = spacy.load("en_core_web_sm")
 nlp = spacy.load("en_core_web_lg")
 
 def clean_text(text: str) -> str:
@@ -56,23 +60,34 @@ def improved_ner(text: str) -> Dict[str, List[str]]:
     
     return entities
 
-#def perform_ner(text: str) -> Dict[str, list]:
-#    doc = nlp(text)
-#    entities = {
-#        "PERSON": [],
-#        "ORG": [],
-#        "PRODUCT": [],
-#        "GPE": [],  # Geopolitical Entities (e.g., countries, cities)
-#        "TECH": []  # Custom category for technology-related terms
-#    }
-#    
-#    for ent in doc.ents:
-#        if ent.label_ in entities:
-#            entities[ent.label_].append(ent.text)
-#        elif ent.label_ == "MISC" and any(tech_term in ent.text.lower() for tech_term in ["database", "api", "software", "algorithm"]):
-#            entities["TECH"].append(ent.text)
-#    
-#    return entities
+def preprocess_for_lda(text):
+    tokens = nltk.word_tokenize(text.lower())
+    return [token for token in tokens if token not in STOPWORDS and len(token) > 3]
+
+def perform_topic_modeling(text: str, num_topics: int = 3) -> List[Dict[str, Any]]:
+    processed_text = preprocess_for_lda(text)
+    
+    # Create a dictionary representation of the documents
+    dictionary = corpora.Dictionary([processed_text])
+    
+    # Create a document-term matrix
+    corpus = [dictionary.doc2bow(text) for text in [processed_text]]
+    
+    # Generate LDA model
+    lda_model = LdaModel(corpus=corpus, id2word=dictionary, num_topics=num_topics, random_state=100,
+                         update_every=1, chunksize=100, passes=10, alpha='auto', per_word_topics=True)
+    
+    # Extract topics
+    topics = []
+    for idx, topic in lda_model.print_topics(-1):
+        topic_terms = [(term.split('*')[1].strip().replace('"', ''), float(term.split('*')[0])) 
+                       for term in topic.split(' + ')]
+        topics.append({
+            'id': idx,
+            'terms': topic_terms
+        })
+    
+    return topics
 
 def process_transcription(transcription_data: Dict[str, Any]) -> Dict[str, Any]:
     cleaned_segments = []
@@ -89,8 +104,8 @@ def process_transcription(transcription_data: Dict[str, Any]) -> Dict[str, Any]:
         }
         cleaned_segments.append(cleaned_segment)
     
-#    entities = perform_ner(full_text)
     entities = improved_ner(full_text)
+    topics = perform_topic_modeling(full_text)
     
     processed_data = {
         'original_transcription': full_text,
@@ -98,7 +113,8 @@ def process_transcription(transcription_data: Dict[str, Any]) -> Dict[str, Any]:
         'cleaned_segments': cleaned_segments,
         'language': transcription_data['language'],
         'duration': transcription_data['duration'],
-        'entities': entities
+        'entities': entities,
+	'topics': topics
     }
     
     return processed_data
